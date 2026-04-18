@@ -1,7 +1,7 @@
 // server.js
 import express from 'express';
 import path from 'path';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
@@ -142,7 +142,8 @@ let onlineUsers = [];
 const heartbeatInterval = setInterval(() => {
   wss.clients.forEach((ws) => {
     if (ws.isAlive === false) {
-      console.log(`[${new Date().toISOString()}] 用户 ${ws.userId} 无响应，断开连接`);
+      const userName = ws.userName || 'unknown';
+      console.log(`[${new Date().toISOString()}] 用户 ${userName} 无响应，断开连接`);
       return ws.terminate();
     }
     ws.isAlive = false;
@@ -173,10 +174,18 @@ wss.on('connection', (ws, req) => {
   if (existingUser && existingUser.ws.readyState === WebSocket.OPEN) {
     console.log(`[${new Date().toISOString()}] 用户 ${userName} 重新连接，断开旧连接`);
     existingUser.ws.close(1000, 'Reconnect');
+    
+    // 立即从onlineUsers中移除旧连接的用户对象
+    const oldIndex = onlineUsers.findIndex(u => u.userId === existingUser.userId);
+    if (oldIndex !== -1) {
+      onlineUsers.splice(oldIndex, 1);
+    }
   }
 
   // 初始化连接
   ws.isAlive = true;
+  ws.userName = userName;  // 保存用户名用于日志输出
+  ws.userId = userId;      // 保存用户ID
   ws.on('pong', () => {
     ws.isAlive = true;
   });
@@ -306,8 +315,31 @@ wss.on('connection', (ws, req) => {
 function broadcast(message, excludeWs) {
   const payload = JSON.stringify(message);
   wss.clients.forEach(client => {
-    if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
-      client.send(payload);
+    try {
+      if (client !== excludeWs && client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    } catch (e) {
+      console.error(`[${new Date().toISOString()}] 广播消息失败:`, e.message);
     }
   });
 }
+
+// WebSocket服务器事件监控
+wss.on('error', (error) => {
+  console.error(`[${new Date().toISOString()}] WebSocket服务器错误:`, error.message);
+});
+
+// 全局错误处理
+process.on('uncaughtException', (error) => {
+  console.error(`[${new Date().toISOString()}] 未捕获的异常:`, error);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error(`[${new Date().toISOString()}] 未处理的Promise拒绝:`, reason);
+});
+
+// 定期打印连接状态
+setInterval(() => {
+  console.log(`[${new Date().toISOString()}] 连接状态 - 在线用户: ${onlineUsers.length}, WebSocket客户端: ${wss.clients.size}`);
+}, 60000);

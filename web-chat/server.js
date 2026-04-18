@@ -169,6 +169,9 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
+  // 创建新用户ID（在使用之前先定义）
+  const userId = crypto.randomBytes(8).toString('hex');
+
   // 断开同用户名的旧连接，防止重复登录
   const existingUser = onlineUsers.find(u => u.userName === userName);
   if (existingUser && existingUser.ws.readyState === WebSocket.OPEN) {
@@ -198,8 +201,7 @@ wss.on('connection', (ws, req) => {
     return;
   }
 
-  // 创建新用户
-  const userId = crypto.randomBytes(8).toString('hex');
+  // 添加用户到在线列表
   const userObj = { userId, userName, ws, connectedAt: new Date() };
   onlineUsers.push(userObj);
 

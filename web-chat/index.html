@@ -244,6 +244,7 @@
           this.connect();
           this.loginUI.hidePanel();
           this.loginUI.setUserInfo(this.auth.userName);
+          this.updateUserList([], 0); // 初始化空用户列表
         } else {
           this.loginUI.showPanel();
         }

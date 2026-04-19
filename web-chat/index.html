@@ -126,6 +126,40 @@
   <div id="userListOverlay" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: 99;"></div>
 
   <script>
+    // 消息存储管理类
+    class MessageStorage {
+      constructor() {
+        this.storageKey = 'chatMessages';
+      }
+
+      saveMessage(sender, content, timestamp, type = 'text', fileName = '') {
+        const messages = this.getMessages();
+        messages.push({
+          sender: sender.userName,
+          senderId: sender.userId,
+          content: content,
+          timestamp: timestamp,
+          type: type,  // 'text' 或 'image'
+          fileName: fileName
+        });
+        localStorage.setItem(this.storageKey, JSON.stringify(messages));
+      }
+
+      getMessages() {
+        try {
+          const data = localStorage.getItem(this.storageKey);
+          return data ? JSON.parse(data) : [];
+        } catch (e) {
+          console.error('读取消息记录失败:', e);
+          return [];
+        }
+      }
+
+      clearMessages() {
+        localStorage.removeItem(this.storageKey);
+      }
+    }
+
     // 用户认证管理类
     class AuthManager {
       constructor() {
@@ -268,6 +302,7 @@
         this.isConnected = false;
         this.authFailed = false;  // 标记认证失败，防止重复提示
         this.auth = new AuthManager();
+        this.messageStorage = new MessageStorage();
         this.isPhonePortrait = window.innerWidth <= 768;
         this.loginUI = new LoginUI(
           (u, p) => this.login(u, p),
@@ -283,6 +318,7 @@
           this.loginUI.hidePanel();
           this.loginUI.setUserInfo(this.auth.userName);
           this.updateUserList([], 0); // 初始化空用户列表
+          this.restoreLocalMessages();  // 恢复本地消息
         } else {
           this.loginUI.showPanel();
         }
@@ -304,6 +340,20 @@
           // 关闭弹窗
           this.closeUserList();
         }
+      }
+
+      restoreLocalMessages() {
+        const messages = this.messageStorage.getMessages();
+        messages.forEach(msg => {
+          if (msg.type === 'text') {
+            const sender = { userId: msg.senderId, userName: msg.sender };
+            this.addMessageToDOM(sender, msg.content, msg.timestamp, false);
+          } else if (msg.type === 'image') {
+            const sender = { userId: msg.senderId, userName: msg.sender };
+            this.addImageToDOM(sender, msg.content, msg.timestamp, false);
+          }
+        });
+        this.scrollToBottom();
       }
 
       async login(username, password) {
@@ -357,6 +407,7 @@
           this.ws.close();
         }
         this.closeUserList();  // 关闭用户列表弹窗
+        this.messageStorage.clearMessages();  // 清空本地消息
         this.loginUI.clearUserInfo();
         this.loginUI.showPanel();
         this.currentUser = null;
@@ -642,7 +693,7 @@
         userListContainer.innerHTML = html;
       }
 
-      addMessageToDOM(sender, message, timestamp) {
+      addMessageToDOM(sender, message, timestamp, saveToLocal = true) {
         const messageArea = document.getElementById('messageArea');
         const isOwnMessage = sender.userId === this.currentUser?.userId;
         const backgroundColor = isOwnMessage ? '#3498db' : '#f8f9fa';
@@ -662,9 +713,14 @@
         messageDiv.appendChild(senderInfo);
         messageDiv.appendChild(messageText);
         messageArea.appendChild(messageDiv);
+
+        // 保存到本地存储
+        if (saveToLocal) {
+          this.messageStorage.saveMessage(sender, message, timestamp, 'text');
+        }
       }
 
-      addImageToDOM(sender, imageBase64, timestamp) {
+      addImageToDOM(sender, imageBase64, timestamp, saveToLocal = true) {
         const messageArea = document.getElementById('messageArea');
         const isOwnMessage = sender.userId === this.currentUser?.userId;
         const backgroundColor = isOwnMessage ? '#3498db' : '#f8f9fa';
@@ -688,6 +744,11 @@
         messageDiv.appendChild(senderInfo);
         messageDiv.appendChild(img);
         messageArea.appendChild(messageDiv);
+
+        // 保存到本地存储
+        if (saveToLocal) {
+          this.messageStorage.saveMessage(sender, imageBase64, timestamp, 'image');
+        }
       }
 
       scrollToBottom() {

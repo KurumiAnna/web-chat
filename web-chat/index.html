@@ -438,7 +438,7 @@
       handleOpen() {
         this.isConnected = true;
         this.reconnectAttempts = 0;
-        this.updateStatus('已连接', '#2ecc71');
+        this.updateStatus('Banishment This World！', '#2ecc71');
         console.log('WebSocket已连接');
         while (this.messageBuffer.length > 0) {
           this.ws.send(this.messageBuffer.shift());

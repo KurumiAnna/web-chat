@@ -15,6 +15,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 const MAX_USERS = 15;
 const MESSAGE_MAX_LENGTH = 500;
 const HEARTBEAT_INTERVAL = 30000; // 30秒
+const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const IMAGE_DATA_URL_RE = /^data:image\/(?:png|jpeg|webp|gif);base64,([A-Za-z0-9+/]+={0,2})$/;
 const USERS_DB_FILE = path.join(__dirname, 'users.json');
 
 // 用户数据库管理
@@ -22,7 +25,7 @@ class UserDB {
   constructor(filePath) {
     this.filePath = filePath;
     this.users = this.loadUsers();
-    this.tokens = new Map(); // token -> username映射
+    this.tokens = new Map(); // token -> { username, expiresAt }
   }
 
   loadUsers() {
@@ -50,8 +53,8 @@ class UserDB {
       return { success: false, message: '用户名已存在' };
     }
 
-    const passwordHash = this.hashPassword(password);
-    this.users[username] = { password: passwordHash, createdAt: new Date().toISOString() };
+    const passwordRecord = this.hashPassword(password);
+    this.users[username] = { ...passwordRecord, createdAt: new Date().toISOString() };
     this.saveUsers();
     
     console.log(`[${new Date().toISOString()}] 新用户注册: ${username}`);
@@ -64,19 +67,33 @@ class UserDB {
       return { success: false, message: '用户不存在' };
     }
 
-    if (user.password !== this.hashPassword(password)) {
+    if (!this.verifyPassword(password, user)) {
       return { success: false, message: '密码错误' };
     }
 
-    const token = crypto.randomBytes(16).toString('hex');
-    this.tokens.set(token, username);
+    // 登录成功时自动迁移旧版 SHA-256 密码记录。
+    if (typeof user.password === 'string') {
+      const passwordRecord = this.hashPassword(password);
+      this.users[username] = { ...user, ...passwordRecord };
+      delete this.users[username].password;
+      this.saveUsers();
+    }
+
+    const token = crypto.randomBytes(32).toString('hex');
+    this.tokens.set(token, { username, expiresAt: Date.now() + TOKEN_TTL_MS });
     
     console.log(`[${new Date().toISOString()}] 用户登录: ${username}`);
     return { success: true, token, username };
   }
 
   validateToken(token) {
-    return this.tokens.get(token);
+    const session = this.tokens.get(token);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+      this.tokens.delete(token);
+      return null;
+    }
+    return session.username;
   }
 
   invalidateToken(token) {
@@ -84,7 +101,24 @@ class UserDB {
   }
 
   hashPassword(password) {
-    return crypto.createHash('sha256').update(password + 'salt_key').digest('hex');
+    const salt = crypto.randomBytes(16).toString('hex');
+    const passwordHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    return { passwordHash, salt, passwordAlgorithm: 'scrypt' };
+  }
+
+  verifyPassword(password, user) {
+    if (user.passwordAlgorithm === 'scrypt' && user.passwordHash && user.salt) {
+      const stored = Buffer.from(user.passwordHash, 'hex');
+      const candidate = crypto.scryptSync(password, user.salt, stored.length);
+      return stored.length === candidate.length && crypto.timingSafeEqual(stored, candidate);
+    }
+
+    // 兼容旧数据；成功登录后会迁移为 scrypt。
+    if (typeof user.password === 'string') {
+      const legacyHash = crypto.createHash('sha256').update(password + 'salt_key').digest('hex');
+      return user.password === legacyHash;
+    }
+    return false;
   }
 }
 
@@ -122,6 +156,14 @@ app.post('/api/auth/login', (req, res) => {
 
   const result = userDB.authenticateUser(username, password);
   res.json(result);
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  const authorization = req.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+  if (token) userDB.invalidateToken(token);
+
+  res.json({ success: true });
 });
 
 app.get('/', (req, res) => {
@@ -265,8 +307,15 @@ wss.on('connection', (ws, req) => {
           return;
         }
 
-        // 检查Base64大小（限制在40MB以内）
-        if (data.image.length > 40 * 1024 * 1024) {
+        const imageMatch = IMAGE_DATA_URL_RE.exec(data.image);
+        if (!imageMatch) {
+          ws.send(JSON.stringify({ type: 'error', message: '仅支持 PNG、JPEG、WebP 或 GIF 图片' }));
+          return;
+        }
+
+        const padding = (imageMatch[1].match(/=*$/) || [''])[0].length;
+        const imageBytes = Math.floor(imageMatch[1].length * 3 / 4) - padding;
+        if (imageBytes > MAX_IMAGE_BYTES) {
           ws.send(JSON.stringify({ 
             type: 'error', 
             message: '图片大小不能超过20MB' 

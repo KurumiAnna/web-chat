@@ -133,6 +133,8 @@
       }
 
       saveMessage(sender, content, timestamp, type = 'text', fileName = '') {
+        // Base64 图片很容易超过 localStorage 配额，只持久化文本消息。
+        if (type === 'image') return;
         const messages = this.getMessages();
         messages.push({
           sender: sender.userName,
@@ -142,7 +144,11 @@
           type: type,  // 'text' 或 'image'
           fileName: fileName
         });
-        localStorage.setItem(this.storageKey, JSON.stringify(messages));
+        try {
+          localStorage.setItem(this.storageKey, JSON.stringify(messages));
+        } catch (e) {
+          console.error('保存消息记录失败:', e);
+        }
       }
 
       getMessages() {
@@ -301,6 +307,7 @@
         this.messageBuffer = [];
         this.isConnected = false;
         this.authFailed = false;  // 标记认证失败，防止重复提示
+        this.isLoggingOut = false;
         this.auth = new AuthManager();
         this.messageStorage = new MessageStorage();
         this.isPhonePortrait = window.innerWidth <= 768;
@@ -366,6 +373,7 @@
 
           const data = await response.json();
           if (data.success) {
+            this.authFailed = false;
             this.auth.setAuth(data.token, data.username);
             this.loginUI.hidePanel();
             this.loginUI.setUserInfo(data.username);
@@ -400,9 +408,20 @@
         }
       }
 
-      logout() {
+      async logout(notifyServer = true) {
+        const token = this.auth.token;
+        this.isLoggingOut = true;
+        if (notifyServer && token) {
+          try {
+            await fetch('/api/auth/logout', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}` }
+            });
+          } catch (e) {
+            console.warn('服务端注销失败，本地登录状态仍会清除:', e);
+          }
+        }
         this.auth.clearAuth();
-        this.authFailed = false;  // 重置认证失败标记
         if (this.ws) {
           this.ws.close();
         }
@@ -418,6 +437,7 @@
       connect(token) {
         // 使用提供的token，或从auth获取
         const wsToken = token || this.auth.token;
+        this.isLoggingOut = false;
         if (!wsToken) {
           console.error('无效的token，无法连接');
           this.updateStatus('认证失败', '#e74c3c');
@@ -452,7 +472,7 @@
         console.log('WebSocket已断开，重连次数:', this.reconnectAttempts);
         
         // 如果认证失败，不要重连，需要用户重新登录
-        if (this.authFailed) {
+        if (this.authFailed || this.isLoggingOut) {
           this.updateStatus('认证失败，请重新登录', '#e74c3c');
           return;
         }
@@ -479,7 +499,7 @@
           const data = JSON.parse(event.data);
           switch (data.type) {
             case 'userJoin':
-              if (data.user && !this.currentUser) {
+              if (data.user) {
                 this.currentUser = { ...data.user };
               }
               this.updateUserList(data.userList, data.onlineCount);
@@ -498,7 +518,7 @@
             case 'error':
               if (data.message.includes('认证') && !this.authFailed) {
                 this.authFailed = true;  // 防止后续重复显示认证错误
-                this.logout();  // 自动登出
+                this.logout(false);  // token 已无效，只清除本地状态
               }
               break;
           }
@@ -677,20 +697,28 @@
 
       updateUserList(users, count) {
         const userListContainer = document.getElementById('userList');
-        let html = `<h4>在线用户（${count}人）</h4>`;
-        
+        userListContainer.replaceChildren();
+        const heading = document.createElement('h4');
+        heading.textContent = `在线用户（${count}人）`;
+        userListContainer.appendChild(heading);
+
         if (users && users.length > 0) {
-          html += '<ul style="list-style: none; padding-left: 0; margin-top: 10px;">';
+          const list = document.createElement('ul');
+          list.style.cssText = 'list-style: none; padding-left: 0; margin-top: 10px;';
           users.forEach(user => {
             const isCurrentUser = user.userId === this.currentUser?.userId;
             const badge = isCurrentUser ? ' ✓' : '';
-            const style = isCurrentUser ? 'font-weight: bold; color: #3498db;' : '';
-            html += `<li style="${style} margin: 8px 0; padding: 8px; background: #f0f0f0; border-radius: 5px; word-break: break-word;">${user.userName}${badge}</li>`;
+            const item = document.createElement('li');
+            item.style.cssText = 'margin: 8px 0; padding: 8px; background: #f0f0f0; border-radius: 5px; word-break: break-word;';
+            if (isCurrentUser) {
+              item.style.fontWeight = 'bold';
+              item.style.color = '#3498db';
+            }
+            item.textContent = `${user.userName}${badge}`;
+            list.appendChild(item);
           });
-          html += '</ul>';
+          userListContainer.appendChild(list);
         }
-        
-        userListContainer.innerHTML = html;
       }
 
       addMessageToDOM(sender, message, timestamp, saveToLocal = true) {
@@ -738,17 +766,18 @@
         img.style.cssText = `max-width: 300px; max-height: 400px; border-radius: 5px; margin-top: 10px; cursor: pointer;`;
         img.addEventListener('click', () => {
           const fullWindow = window.open();
-          fullWindow.document.write(`<img src="${imageBase64}" style="max-width: 100%; max-height: 100%;">`);
+          if (!fullWindow) return;
+          const fullImage = fullWindow.document.createElement('img');
+          fullImage.src = imageBase64;
+          fullImage.style.cssText = 'max-width: 100%; max-height: 100%;';
+          fullWindow.document.body.appendChild(fullImage);
         });
 
         messageDiv.appendChild(senderInfo);
         messageDiv.appendChild(img);
         messageArea.appendChild(messageDiv);
 
-        // 保存到本地存储
-        if (saveToLocal) {
-          this.messageStorage.saveMessage(sender, imageBase64, timestamp, 'image');
-        }
+        // 图片不写入 localStorage，避免 Base64 数据耗尽浏览器配额。
       }
 
       scrollToBottom() {
